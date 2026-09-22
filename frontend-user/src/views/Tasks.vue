@@ -76,7 +76,19 @@
       </div>
       </div>
 
-      <div v-if="filteredTasks.length > 0" class="tasks-list">
+      <div v-if="loading" class="empty-state">
+      <div class="empty-icon">⏳</div>
+      <h3>加载中…</h3>
+      <p>正在获取您的任务</p>
+      </div>
+
+      <div v-else-if="loadError" class="empty-state">
+      <div class="empty-icon">⚠️</div>
+      <h3>加载失败</h3>
+      <p>{{ loadError }}</p>
+      </div>
+
+      <div v-else-if="filteredTasks.length > 0" class="tasks-list">
       <div
         v-for="task in filteredTasks"
         :key="task.id"
@@ -240,8 +252,9 @@
 <script>
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
-import { logger } from '../utils/api'
-import { authState } from '../utils/auth'
+import { api, logger } from '../utils/api'
+import { authState, isAuthenticated, updateCurrentUser, normalizeUser } from '../utils/auth'
+import { openLoginModal } from '../utils/ui'
 import { taskStore } from '../utils/taskStore'
 
 export default {
@@ -264,7 +277,12 @@ export default {
       toastType: 'success',
       toastTitle: '',
       toastMessage: '',
-      refreshKey: 0
+      // 任务数据：只存当前登录用户的数据，初始为空（杜绝显示旧账户内容）
+      tasks: [],
+      loading: false,
+      loadError: '',
+      // 请求序号：快速切换栏目/标签时只接受最后一次响应
+      loadSeq: 0
     }
   },
   computed: {
@@ -273,8 +291,7 @@ export default {
       return '确认支付 ¥' + this.selectedTask.amount.toLocaleString() + ' 元'
     },
     allTasks() {
-      this.refreshKey
-      return taskStore.getAll()
+      return this.tasks
     },
     pendingTasks() {
       return this.allTasks.filter(task => task.status !== 'completed' && task.status !== 'cancelled')
@@ -302,14 +319,48 @@ export default {
     }
   },
   mounted() {
-    this.refreshTasks()
-  },
-  activated() {
-    this.refreshTasks()
+    if (!this.guardAuth()) return
+    this.loadTasks()
   },
   methods: {
-    refreshTasks() {
-      this.refreshKey++
+    /** 登录态守卫 */
+    guardAuth() {
+      if (!isAuthenticated()) {
+        logger.warn('Tasks accessed without session')
+        this.tasks = []
+        openLoginModal('请先登录后查看任务中心')
+        this.$router.replace('/')
+        return false
+      }
+      return true
+    },
+    /**
+     * 拉取当前登录用户的任务（服务端按 token 归属返回）
+     * 每次进入页面/操作完成后刷新，保证与资料面板、订单详情一致
+     */
+    async loadTasks() {
+      if (!this.guardAuth()) return
+      const seq = ++this.loadSeq
+      this.loading = true
+      this.loadError = ''
+      const result = await api.getTasks()
+      // 过期响应（快速切换栏目/重新登录）直接丢弃，防止旧账户数据覆盖
+      if (seq !== this.loadSeq || !isAuthenticated()) {
+        this.loading = false
+        return
+      }
+      this.loading = false
+      if (result.unauthorized) {
+        this.tasks = []
+        return
+      }
+      if (result.success && Array.isArray(result.data)) {
+        this.tasks = result.data
+      } else {
+        // 接口失败：仅回落到当前登录用户的本地存储，不展示他人/示例数据
+        this.tasks = taskStore.getAll()
+        this.loadError = '网络异常，当前显示本地缓存数据'
+      }
     },
     getTypeText() {
       const typeMap = {
@@ -324,13 +375,14 @@ export default {
       this.activeTab = tab
     },
     handleAction(task, action) {
+      if (!this.guardAuth()) return
       this.selectedTask = { ...task }
-      
+
       if (action.route) {
         this.navigateToRoute(action.route, action.key, task)
         return
       }
-      
+
       const actionMap = {
         pay: () => this.openPayModal(),
         cancel: () => this.openCancelModal(),
@@ -346,7 +398,7 @@ export default {
     },
     navigateToRoute(route, actionKey, task) {
       logger.info('Navigate to business page', { route, actionKey, taskId: task.id, type: task.type })
-      
+
       const query = {}
       if (task.extra) {
         if (task.type === 'booking' && task.extra.tableId) {
@@ -362,7 +414,7 @@ export default {
           query.orderNo = task.extra.orderNo
         }
       }
-      
+
       this.$router.push({ path: route, query })
     },
     openPayModal() {
@@ -377,41 +429,39 @@ export default {
     async confirmPay() {
       if (!this.selectedTask) return
       this.payLoading = true
-      
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      
-      const updatedTask = taskStore.markAsPaid(this.selectedTask.id)
-      
+
+      const result = await api.doTaskAction({ taskId: this.selectedTask.id, action: 'pay' })
+
       this.payLoading = false
       this.showPayModal = false
-      
-      if (updatedTask) {
-        this.refreshTasks()
+
+      if (result.unauthorized) return
+      if (result.success && result.data?.success !== false) {
+        await this.loadTasks()
         this.successTitle = '支付成功'
         this.successMessage = '您的订单已支付成功'
         this.showSuccessModal = true
         logger.info('Payment successful', { taskId: this.selectedTask.id, amount: this.selectedTask.amount })
       } else {
-        this.showNotification('error', '支付失败', '请稍后重试')
+        this.showNotification('error', '支付失败', result.data?.message || '请稍后重试')
       }
     },
     async confirmCancel() {
       if (!this.selectedTask) return
       this.cancelLoading = true
-      
-      await new Promise(resolve => setTimeout(resolve, 800))
-      
-      const result = taskStore.remove(this.selectedTask.id)
-      
+
+      const result = await api.doTaskAction({ taskId: this.selectedTask.id, action: 'cancel' })
+
       this.cancelLoading = false
       this.showCancelModal = false
-      
-      if (result) {
-        this.refreshTasks()
+
+      if (result.unauthorized) return
+      if (result.success && result.data?.success !== false) {
+        await this.loadTasks()
         this.showNotification('success', '取消成功', '任务已取消')
         logger.info('Task cancelled', { taskId: this.selectedTask.id })
       } else {
-        this.showNotification('error', '取消失败', '请稍后重试')
+        this.showNotification('error', '取消失败', result.data?.message || '请稍后重试')
       }
     },
     async handleRemind() {
@@ -419,12 +469,25 @@ export default {
       this.showNotification('success', '已提醒', '已提醒卖家尽快发货')
       logger.info('Reminder sent', { taskId: this.selectedTask.id })
     },
-    handleConfirm() {
+    async handleConfirm() {
       if (!this.selectedTask) return
-      const result = taskStore.updateStatus(this.selectedTask.id, 'completed')
-      if (result) {
-        this.refreshTasks()
-        this.showNotification('success', '确认收货成功', '感谢您的购买')
+      const result = await api.doTaskAction({ taskId: this.selectedTask.id, action: 'confirm' })
+      if (result.unauthorized) return
+      if (result.success && result.data?.success) {
+        // 完成任务（确认收货）：服务端已奖励积分，用返回资料更新全局用户
+        if (result.data.profile) {
+          const normalized = normalizeUser(result.data.profile)
+          if (normalized) updateCurrentUser(normalized)
+        }
+        await this.loadTasks()
+        const awarded = result.data.pointsAwarded
+        this.showNotification(
+          'success',
+          '确认收货成功',
+          awarded > 0 ? `感谢您的购买，获得 ${awarded} 积分` : '感谢您的购买'
+        )
+      } else {
+        this.showNotification('error', '操作失败', result.data?.message || '请稍后重试')
       }
     },
     handleReview() {

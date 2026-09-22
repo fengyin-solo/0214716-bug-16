@@ -18,7 +18,7 @@
               </svg>
             </div>
             <h2>登录账户</h2>
-            <p>登录后享受更多服务</p>
+            <p>{{ message || '登录后享受更多服务' }}</p>
           </div>
 
           <form class="login-form" @submit.prevent="handleLogin">
@@ -77,8 +77,12 @@ import { logger } from '../utils/api'
 
 export default {
   name: 'LoginModal',
-  props: { modelValue: Boolean },
-  emits: ['update:modelValue', 'success'],
+  props: {
+    modelValue: Boolean,
+    // 弹窗副标题提示，如“登录已失效，请重新登录”
+    message: { type: String, default: '' }
+  },
+  emits: ['update:modelValue', 'success', 'login-success'],
   data() {
     return { username: '', password: '', showPassword: false, loading: false, error: null }
   },
@@ -92,7 +96,7 @@ export default {
         return
       }
       if (!this.password || this.password.length < 6) {
-        this.error = '密码至少需要6个字符'
+        this.error = '密码至少需要6位字符'
         return
       }
       this.loading = true
@@ -101,7 +105,9 @@ export default {
         const result = await login(this.username, this.password)
         if (result.success) {
           logger.info('Login successful')
+          // 同时兼容 success / login-success 两种监听
           this.$emit('success', result.user)
+          this.$emit('login-success', result.user)
           this.close()
           this.username = ''
           this.password = ''

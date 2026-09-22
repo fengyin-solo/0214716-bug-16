@@ -1,9 +1,17 @@
 /**
  * 任务中心存储管理
  * 统一管理预约、报名、订单等任务数据，使用 localStorage 持久化
+ *
+ * 数据归属：
+ * - 所有任务按用户ID分桶存储（billiard_user_tasks:<userId>），不同账号互不可见
+ * - 未绑定时使用临时桶，登录后必须通过 bindUser 切换到当前账号
+ * - 退出登录时调用 unbindUser，防止下一账号看到上一账号内容
  */
 
-const STORAGE_KEY = 'billiard_user_tasks'
+const STORAGE_PREFIX = 'billiard_user_tasks'
+const LEGACY_STORAGE_KEY = 'billiard_user_tasks'
+const DEMO_USER_ID = 'U20260001'
+
 const logger = {
   info: (...args) => console.log('[taskStore]', ...args),
   warn: (...args) => console.warn('[taskStore]', ...args),
@@ -106,10 +114,47 @@ const statusConfig = {
   cancelled: { text: '已取消', type: 'success' }
 }
 
+/** 当前绑定的用户ID，null 表示匿名/未登录会话 */
+let currentUserId = null
+
+/**
+ * 绑定当前登录用户，后续读写都限定在该用户的数据桶内
+ * @param {string} userId
+ */
+function bindUser(userId) {
+  const nextId = userId ? String(userId) : null
+  if (currentUserId !== nextId) {
+    currentUserId = nextId
+    logger.info('任务存储已切换到用户', currentUserId || '(匿名)')
+  }
+}
+
+/**
+ * 解绑用户（退出登录时调用），清空对账户数据桶的引用
+ */
+function unbindUser() {
+  if (currentUserId !== null) {
+    logger.info('任务存储已解绑用户', currentUserId)
+  }
+  currentUserId = null
+}
+
+function storageKey() {
+  return currentUserId ? `${STORAGE_PREFIX}:${currentUserId}` : `${STORAGE_PREFIX}:anonymous`
+}
+
 function loadTasks() {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : getDefaultTasks()
+    const key = storageKey()
+    const stored = localStorage.getItem(key)
+    if (stored) {
+      const parsed = JSON.parse(stored)
+      return Array.isArray(parsed) ? parsed : getDefaultTasks()
+    }
+    // 首次使用该桶：仅演示账号生成示例任务，其他账号（含匿名）为空，避免串号
+    const defaults = getDefaultTasks()
+    saveTasks(defaults)
+    return defaults
   } catch (e) {
     logger.error('加载任务失败', e)
     return getDefaultTasks()
@@ -118,7 +163,7 @@ function loadTasks() {
 
 function saveTasks(tasks) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+    localStorage.setItem(storageKey(), JSON.stringify(tasks))
     return true
   } catch (e) {
     logger.error('保存任务失败', e)
@@ -126,10 +171,30 @@ function saveTasks(tasks) {
   }
 }
 
+/**
+ * 清理历史遗留的全局任务数据（未按用户隔离的旧版本数据）
+ * 防止旧数据在新账号上被误读
+ */
+function purgeLegacyTasks() {
+  try {
+    if (localStorage.getItem(LEGACY_STORAGE_KEY)) {
+      localStorage.removeItem(LEGACY_STORAGE_KEY)
+      logger.info('已清理未按用户隔离的历史任务数据')
+    }
+  } catch (e) {
+    logger.warn('清理历史任务数据失败', e)
+  }
+}
+
 function getDefaultTasks() {
+  // 只有演示账号带示例数据；真实新账号/空资料账号应看到空列表
+  if (currentUserId !== DEMO_USER_ID) {
+    return []
+  }
+  const ts = Date.now()
   return [
     {
-      id: 'T' + Date.now().toString() + '001',
+      id: 'T' + ts + '001',
       type: 'booking',
       title: '3号球桌 - 美式九球',
       subtitle: '2026-02-15 14:00 - 16:00',
@@ -139,7 +204,7 @@ function getDefaultTasks() {
       extra: { tableId: 3, date: '2026-02-15', time: '14:00 - 16:00' }
     },
     {
-      id: 'T' + Date.now().toString() + '002',
+      id: 'T' + ts + '002',
       type: 'course',
       title: '台球入门基础课',
       subtitle: '报名成功，等待开课',
@@ -149,7 +214,7 @@ function getDefaultTasks() {
       extra: { courseId: 1 }
     },
     {
-      id: 'T' + Date.now().toString() + '003',
+      id: 'T' + ts + '003',
       type: 'competition',
       title: '周末九球挑战赛',
       subtitle: '比赛进行中',
@@ -159,14 +224,14 @@ function getDefaultTasks() {
       extra: { competitionId: 2 }
     },
     {
-      id: 'T' + Date.now().toString() + '004',
+      id: 'T' + ts + '004',
       type: 'order',
       title: 'LP专业斯诺克球杆',
       subtitle: '待发货',
       amount: 2999,
       status: 'pending_shipment',
       createdAt: formatDate(new Date(Date.now() - 172800000)),
-      extra: { orderNo: 'SP' + Date.now().toString().slice(-8), productId: 1 }
+      extra: { orderNo: 'SP' + String(ts).slice(-8), productId: 1 }
     }
   ]
 }
@@ -197,9 +262,18 @@ function enrichTask(task) {
 }
 
 export const taskStore = {
+  /** 当前绑定的用户ID（测试/调试用） */
+  get currentUserId() {
+    return currentUserId
+  },
+
+  bindUser,
+  unbindUser,
+  purgeLegacyTasks,
+
   getAll() {
     const tasks = loadTasks()
-    return tasks.map(enrichTask).sort((a, b) => 
+    return tasks.map(enrichTask).sort((a, b) =>
       new Date(b.createdAt) - new Date(a.createdAt)
     )
   },
@@ -241,9 +315,13 @@ export const taskStore = {
       logger.warn('任务不存在', taskId)
       return null
     }
-    tasks[index] = { ...tasks[index], ...updates }
+    // 不允许通过更新篡改任务归属类型与编号
+    const safeUpdates = { ...updates }
+    delete safeUpdates.id
+    delete safeUpdates.userId
+    tasks[index] = { ...tasks[index], ...safeUpdates }
     saveTasks(tasks)
-    logger.info('任务已更新', taskId, updates)
+    logger.info('任务已更新', taskId, safeUpdates)
     return enrichTask(tasks[index])
   },
 
@@ -335,10 +413,10 @@ export const taskStore = {
   markAsPaid(taskId) {
     const task = this.getById(taskId)
     if (!task) return null
-    
+
     let newStatus = 'upcoming'
     let newSubtitle = '支付成功'
-    
+
     if (task.type === 'order') {
       newStatus = 'pending_shipment'
       newSubtitle = '支付成功，待发货'
@@ -347,7 +425,7 @@ export const taskStore = {
     } else if (task.type === 'booking') {
       newSubtitle = '支付成功，等待使用'
     }
-    
+
     return this.update(taskId, { status: newStatus, subtitle: newSubtitle })
   },
 
@@ -361,7 +439,7 @@ export const taskStore = {
 
   clearAll() {
     saveTasks([])
-    logger.info('所有任务已清除')
+    logger.info('当前用户的所有任务已清除')
   }
 }
 

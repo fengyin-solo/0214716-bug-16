@@ -33,8 +33,12 @@
     <!-- 页脚组件 -->
     <FooterBar />
     
-    <!-- 登录弹窗 -->
-    <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
+    <!-- 全局登录弹窗（路由守卫/会话失效/导航栏登录共用） -->
+    <LoginModal
+      v-model="showLoginModal"
+      :message="loginMessage"
+      @success="onLoginSuccess"
+    />
   </div>
 </template>
 
@@ -43,21 +47,23 @@
  * 应用根组件
  * 负责整合全局布局组件和管理登录状态
  */
-import { authState } from './utils/auth'
+import { authState, isAuthenticated, onSessionExpired } from './utils/auth'
+import { uiState, openLoginModal, closeLoginModal } from './utils/ui'
 import NavBar from './components/NavBar.vue'
 import FooterBar from './components/FooterBar.vue'
 import LoginModal from './components/LoginModal.vue'
 
 export default {
   name: 'App',
-  components: { 
+  components: {
     NavBar,
     FooterBar,
-    LoginModal 
+    LoginModal
   },
   data() {
     return {
-      showLoginModal: false // 登录弹窗显示状态
+      // 会话失效后的统一提示
+      sessionMessage: ''
     }
   },
   computed: {
@@ -74,21 +80,59 @@ export default {
      */
     userName() {
       return authState.user?.name || 'U'
+    },
+    showLoginModal: {
+      get() {
+        return uiState.loginModalVisible
+      },
+      set(val) {
+        uiState.loginModalVisible = val
+        if (!val) {
+          uiState.loginMessage = ''
+          this.sessionMessage = ''
+        }
+      }
+    },
+    loginMessage() {
+      return this.sessionMessage || uiState.loginMessage
     }
+  },
+  watch: {
+    '$route.query.login'(val) {
+      if (val === '1' && !isAuthenticated()) {
+        openLoginModal('')
+      }
+    }
+  },
+  mounted() {
+    // ?login=1：守卫拦截或历史 /login 链接进入时唤起登录框
+    if (this.$route.query.login === '1' && !isAuthenticated()) {
+      openLoginModal(this.$route.query.redirect ? '请先登录后再访问该页面' : '')
+    }
+
+    // 会话失效（401等）：记录原因并弹出全局登录框
+    onSessionExpired((reason) => {
+      this.sessionMessage = reason
+      uiState.loginModalVisible = true
+    })
   },
   methods: {
     /**
      * 打开登录弹窗
      */
     openLogin() {
-      this.showLoginModal = true
+      this.sessionMessage = ''
+      openLoginModal()
     },
     /**
-     * 登录成功回调
-     * 可在此处添加登录成功后的全局处理逻辑
+     * 登录成功：关闭弹窗，若守卫带了 redirect 则回跳原页面
      */
     onLoginSuccess() {
-      // 登录成功后的处理
+      const redirect = this.$route.query.redirect
+      closeLoginModal()
+      if (redirect && typeof redirect === 'string' && redirect.startsWith('/')) {
+        this.$router.replace(redirect)
+      }
     }
   }
 }
