@@ -6,7 +6,7 @@
         <h1>会员任务中心</h1>
         <p class="subtitle">管理您的所有预约、报名和订单</p>
       </div>
-      <div class="header-actions">
+      <div v-if="isLoggedIn" class="header-actions">
         <div class="stats-summary">
         <div class="stat-item pending">
           <span class="stat-icon">⏳</span>
@@ -27,7 +27,7 @@
       </div>
       </div>
 
-      <div class="filter-section">
+      <div v-if="isLoggedIn" class="filter-section">
       <div class="tab-group">
         <button
           class="tab-btn"
@@ -76,7 +76,13 @@
       </div>
       </div>
 
-      <div v-if="filteredTasks.length > 0" class="tasks-list">
+      <div v-if="!isLoggedIn" class="empty-state">
+      <div class="empty-icon">🔒</div>
+      <h3>登录后查看任务</h3>
+      <p>登录后即可管理您的预约、报名和订单</p>
+    </div>
+
+      <div v-else-if="filteredTasks.length > 0" class="tasks-list">
       <div
         v-for="task in filteredTasks"
         :key="task.id"
@@ -241,7 +247,7 @@
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import { logger } from '../utils/api'
-import { authState } from '../utils/auth'
+import { authState, isAuthenticated } from '../utils/auth'
 import { taskStore } from '../utils/taskStore'
 
 export default {
@@ -251,6 +257,8 @@ export default {
     return {
       activeTab: 'pending',
       activeType: 'all',
+      // 当前登录用户的任务快照：进入页面/每次操作后从本人数据重新加载
+      tasks: [],
       selectedTask: null,
       showPayModal: false,
       showCancelModal: false,
@@ -263,8 +271,7 @@ export default {
       showToast: false,
       toastType: 'success',
       toastTitle: '',
-      toastMessage: '',
-      refreshKey: 0
+      toastMessage: ''
     }
   },
   computed: {
@@ -273,8 +280,7 @@ export default {
       return '确认支付 ¥' + this.selectedTask.amount.toLocaleString() + ' 元'
     },
     allTasks() {
-      this.refreshKey
-      return taskStore.getAll()
+      return this.tasks
     },
     pendingTasks() {
       return this.allTasks.filter(task => task.status !== 'completed' && task.status !== 'cancelled')
@@ -301,15 +307,34 @@ export default {
       return authState.isLoggedIn
     }
   },
+  watch: {
+    // 会话在本页失效（如跨标签页退出）时立即清空并收起弹窗，避免旧账户任务滞留
+    isLoggedIn(loggedIn) {
+      if (!loggedIn) {
+        this.tasks = []
+        this.selectedTask = null
+        this.showPayModal = false
+        this.showCancelModal = false
+        this.showDetailModal = false
+      } else {
+        this.refreshTasks()
+      }
+    }
+  },
   mounted() {
     this.refreshTasks()
   },
   activated() {
+    // 配合 <keep-alive> 或从其他栏目快速返回时，始终重新读取本人数据
     this.refreshTasks()
   },
   methods: {
+    /**
+     * 重新加载当前登录用户的任务
+     * taskStore 按用户ID隔离，未登录返回空数组
+     */
     refreshTasks() {
-      this.refreshKey++
+      this.tasks = isAuthenticated() ? taskStore.getAll() : []
     },
     getTypeText() {
       const typeMap = {
@@ -321,16 +346,22 @@ export default {
       return typeMap[this.activeType] || ''
     },
     switchTab(tab) {
+      // 切换栏目时重新读取，保证快速点击下看到的始终是本人最新数据
+      this.refreshTasks()
       this.activeTab = tab
     },
     handleAction(task, action) {
+      if (!isAuthenticated()) {
+        this.showNotification('warning', '请先登录', '登录后才可操作任务')
+        return
+      }
       this.selectedTask = { ...task }
-      
+
       if (action.route) {
         this.navigateToRoute(action.route, action.key, task)
         return
       }
-      
+
       const actionMap = {
         pay: () => this.openPayModal(),
         cancel: () => this.openCancelModal(),
@@ -346,7 +377,7 @@ export default {
     },
     navigateToRoute(route, actionKey, task) {
       logger.info('Navigate to business page', { route, actionKey, taskId: task.id, type: task.type })
-      
+
       const query = {}
       if (task.extra) {
         if (task.type === 'booking' && task.extra.tableId) {
@@ -362,7 +393,7 @@ export default {
           query.orderNo = task.extra.orderNo
         }
       }
-      
+
       this.$router.push({ path: route, query })
     },
     openPayModal() {
@@ -375,16 +406,22 @@ export default {
       this.showDetailModal = true
     },
     async confirmPay() {
-      if (!this.selectedTask) return
+      if (!this.selectedTask || this.payLoading) return
+      if (!isAuthenticated()) {
+        this.showPayModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再支付')
+        return
+      }
       this.payLoading = true
-      
+
       await new Promise(resolve => setTimeout(resolve, 1000))
-      
+
+      // markAsPaid 内部会校验任务归属，非本人任务返回 null
       const updatedTask = taskStore.markAsPaid(this.selectedTask.id)
-      
+
       this.payLoading = false
       this.showPayModal = false
-      
+
       if (updatedTask) {
         this.refreshTasks()
         this.successTitle = '支付成功'
@@ -392,39 +429,57 @@ export default {
         this.showSuccessModal = true
         logger.info('Payment successful', { taskId: this.selectedTask.id, amount: this.selectedTask.amount })
       } else {
-        this.showNotification('error', '支付失败', '请稍后重试')
+        this.refreshTasks()
+        this.showNotification('error', '支付失败', '订单不存在或登录已失效')
       }
     },
     async confirmCancel() {
-      if (!this.selectedTask) return
+      if (!this.selectedTask || this.cancelLoading) return
+      if (!isAuthenticated()) {
+        this.showCancelModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再操作')
+        return
+      }
       this.cancelLoading = true
-      
+
       await new Promise(resolve => setTimeout(resolve, 800))
-      
+
       const result = taskStore.remove(this.selectedTask.id)
-      
+
       this.cancelLoading = false
       this.showCancelModal = false
-      
+
       if (result) {
         this.refreshTasks()
         this.showNotification('success', '取消成功', '任务已取消')
         logger.info('Task cancelled', { taskId: this.selectedTask.id })
       } else {
-        this.showNotification('error', '取消失败', '请稍后重试')
+        this.refreshTasks()
+        this.showNotification('error', '取消失败', '任务不存在或登录已失效')
       }
     },
     async handleRemind() {
       if (!this.selectedTask) return
+      if (!isAuthenticated()) {
+        this.showNotification('warning', '请先登录', '登录后才可提醒发货')
+        return
+      }
       this.showNotification('success', '已提醒', '已提醒卖家尽快发货')
       logger.info('Reminder sent', { taskId: this.selectedTask.id })
     },
     handleConfirm() {
       if (!this.selectedTask) return
+      if (!isAuthenticated()) {
+        this.showNotification('warning', '登录已失效', '请重新登录后再确认收货')
+        return
+      }
       const result = taskStore.updateStatus(this.selectedTask.id, 'completed')
       if (result) {
         this.refreshTasks()
         this.showNotification('success', '确认收货成功', '感谢您的购买')
+      } else {
+        this.refreshTasks()
+        this.showNotification('error', '操作失败', '订单不存在或登录已失效')
       }
     },
     handleReview() {

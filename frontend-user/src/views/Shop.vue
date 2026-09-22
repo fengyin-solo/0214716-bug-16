@@ -181,7 +181,7 @@
 
     <Toast v-model="showToast" :type="toastType" :title="toastTitle" :message="toastMessage" />
 
-    <LoginModal v-model="showLoginModal" @login-success="onLoginSuccess" />
+    <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
   </div>
 </template>
 
@@ -321,8 +321,23 @@ export default {
       this.showCheckoutModal = true
     },
     async confirmCheckout() {
+      if (!isAuthenticated()) {
+        this.showCheckoutModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再结算')
+        return
+      }
+      if (this.checkoutLoading || this.cart.length === 0) return
       this.checkoutLoading = true
       await new Promise(resolve => setTimeout(resolve, 1500))
+
+      // 模拟请求后再次确认登录态，避免会话失效期间产生无主订单
+      if (!isAuthenticated()) {
+        this.checkoutLoading = false
+        this.showCheckoutModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再结算')
+        return
+      }
+
       const order = {
         orderNo: 'SP' + Date.now().toString().slice(-8),
         amount: this.cartTotal,
@@ -333,8 +348,8 @@ export default {
       this.orderResult = order
       this.orders.unshift(order) // 添加到订单列表
       this.cart = []
-      
-      // 添加到任务中心
+
+      // 添加到任务中心（taskStore 会强制归属当前用户，未登录返回 null）
       taskStore.addOrderTask(order)
       
       this.checkoutLoading = false

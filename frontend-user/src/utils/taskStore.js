@@ -1,9 +1,18 @@
 /**
  * 任务中心存储管理
  * 统一管理预约、报名、订单等任务数据，使用 localStorage 持久化
+ *
+ * 数据归属：
+ * - 所有数据按当前登录用户 ID 隔离存储
+ * - 未登录时读操作返回空集合，写操作一律拒绝
+ * - 读取/修改/删除均校验任务归属，杜绝跨账户看到或操作他人订单
  */
 
+import { getCurrentUserId, isAuthenticated } from './auth'
+
 const STORAGE_KEY = 'billiard_user_tasks'
+const STORAGE_VERSION = 2
+
 const logger = {
   info: (...args) => console.log('[taskStore]', ...args),
   warn: (...args) => console.warn('[taskStore]', ...args),
@@ -29,6 +38,10 @@ const taskTypeConfig = {
       completed: [
         { key: 'view', label: '查看结果', type: 'default' },
         { key: 'rebook', label: '再次预约', type: 'primary', route: '/tables' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default' },
+        { key: 'rebook', label: '再次预约', type: 'primary', route: '/tables' }
       ]
     }
   },
@@ -49,6 +62,9 @@ const taskTypeConfig = {
       completed: [
         { key: 'view', label: '查看结果', type: 'default' },
         { key: 'review', label: '评价', type: 'primary' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default' }
       ]
     }
   },
@@ -68,6 +84,9 @@ const taskTypeConfig = {
       ],
       completed: [
         { key: 'view', label: '查看结果', type: 'default', route: '/competitions' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看详情', type: 'default', route: '/competitions' }
       ]
     }
   },
@@ -91,6 +110,10 @@ const taskTypeConfig = {
         { key: 'view', label: '查看结果', type: 'default', route: '/shop' },
         { key: 'review', label: '评价', type: 'primary' },
         { key: 'rebuy', label: '再次购买', type: 'default', route: '/shop' }
+      ],
+      cancelled: [
+        { key: 'view', label: '查看订单', type: 'default', route: '/shop' },
+        { key: 'rebuy', label: '再次购买', type: 'default', route: '/shop' }
       ]
     }
   }
@@ -106,69 +129,87 @@ const statusConfig = {
   cancelled: { text: '已取消', type: 'success' }
 }
 
-function loadTasks() {
+/** 已支付（计入消费统计）的状态 */
+const PAID_STATUSES = ['upcoming', 'ongoing', 'pending_shipment', 'shipped', 'completed']
+
+// ==================== 存储读写（按用户隔离） ====================
+
+/**
+ * 加载整个存储结构
+ * 兼容并清理旧版本的无主数据（旧格式为数组，无法归属任何用户，直接废弃）
+ * @returns {{version: number, users: Object}}
+ */
+function loadStore() {
+  const empty = { version: STORAGE_VERSION, users: {} }
   try {
     const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : getDefaultTasks()
+    if (!stored) return empty
+
+    const parsed = JSON.parse(stored)
+
+    // 旧版本 / 被污染的数据（顶层为数组或缺少 users）：无归属，全部清除
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.users) {
+      logger.warn('检测到无归属的旧任务数据，已废弃隔离')
+      saveStore(empty)
+      return empty
+    }
+
+    return { version: STORAGE_VERSION, users: parsed.users }
   } catch (e) {
-    logger.error('加载任务失败', e)
-    return getDefaultTasks()
+    logger.error('加载任务存储失败', e)
+    saveStore(empty)
+    return empty
   }
 }
 
-function saveTasks(tasks) {
+function saveStore(store) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
     return true
   } catch (e) {
-    logger.error('保存任务失败', e)
+    logger.error('保存任务存储失败', e)
     return false
   }
 }
 
-function getDefaultTasks() {
-  return [
-    {
-      id: 'T' + Date.now().toString() + '001',
-      type: 'booking',
-      title: '3号球桌 - 美式九球',
-      subtitle: '2026-02-15 14:00 - 16:00',
-      amount: 120,
-      status: 'pending_payment',
-      createdAt: formatDate(new Date(Date.now() - 86400000)),
-      extra: { tableId: 3, date: '2026-02-15', time: '14:00 - 16:00' }
-    },
-    {
-      id: 'T' + Date.now().toString() + '002',
-      type: 'course',
-      title: '台球入门基础课',
-      subtitle: '报名成功，等待开课',
-      amount: 599,
-      status: 'upcoming',
-      createdAt: formatDate(new Date(Date.now() - 259200000)),
-      extra: { courseId: 1 }
-    },
-    {
-      id: 'T' + Date.now().toString() + '003',
-      type: 'competition',
-      title: '周末九球挑战赛',
-      subtitle: '比赛进行中',
-      amount: 100,
-      status: 'ongoing',
-      createdAt: formatDate(new Date(Date.now() - 432000000)),
-      extra: { competitionId: 2 }
-    },
-    {
-      id: 'T' + Date.now().toString() + '004',
-      type: 'order',
-      title: 'LP专业斯诺克球杆',
-      subtitle: '待发货',
-      amount: 2999,
-      status: 'pending_shipment',
-      createdAt: formatDate(new Date(Date.now() - 172800000)),
-      extra: { orderNo: 'SP' + Date.now().toString().slice(-8), productId: 1 }
-    }
-  ]
+/**
+ * 获取当前登录用户ID
+ * @returns {string|null}
+ */
+function currentUserId() {
+  return isAuthenticated() ? getCurrentUserId() : null
+}
+
+/**
+ * 读取当前用户的命名空间（不存在则返回空结构，不自动写入）
+ * @returns {{tasks: Array, pointsRecords: Array}|null} 未登录返回null
+ */
+function getNamespace() {
+  const userId = currentUserId()
+  if (!userId) return null
+
+  const store = loadStore()
+  const ns = store.users[userId]
+  return {
+    tasks: Array.isArray(ns?.tasks) ? ns.tasks : [],
+    pointsRecords: Array.isArray(ns?.pointsRecords) ? ns.pointsRecords : []
+  }
+}
+
+/**
+ * 写回当前用户的命名空间
+ * @param {{tasks: Array, pointsRecords: Array}} namespace
+ * @returns {boolean}
+ */
+function saveNamespace(namespace) {
+  const userId = currentUserId()
+  if (!userId) {
+    logger.warn('未登录，禁止写入任务数据')
+    return false
+  }
+  const store = loadStore()
+  store.users[userId] = namespace
+  return saveStore(store)
 }
 
 function formatDate(date) {
@@ -197,9 +238,14 @@ function enrichTask(task) {
 }
 
 export const taskStore = {
+  /**
+   * 获取当前用户的全部任务（按创建时间倒序）
+   * 未登录返回空数组
+   */
   getAll() {
-    const tasks = loadTasks()
-    return tasks.map(enrichTask).sort((a, b) => 
+    const ns = getNamespace()
+    if (!ns) return []
+    return ns.tasks.map(enrichTask).sort((a, b) =>
       new Date(b.createdAt) - new Date(a.createdAt)
     )
   },
@@ -215,36 +261,69 @@ export const taskStore = {
     return tasks
   },
 
+  /**
+   * 按ID获取任务，仅限当前用户自己的任务
+   */
   getById(taskId) {
-    const tasks = loadTasks()
-    const task = tasks.find(t => t.id === taskId)
+    const ns = getNamespace()
+    if (!ns) return null
+    const task = ns.tasks.find(t => t.id === taskId)
     return task ? enrichTask(task) : null
   },
 
+  /**
+   * 新增任务，强制标记为当前登录用户所有
+   * 未登录时拒绝写入
+   */
   add(taskData) {
-    const tasks = loadTasks()
+    const userId = currentUserId()
+    if (!userId) {
+      logger.warn('未登录，禁止创建任务')
+      return null
+    }
+
+    const ns = getNamespace()
+    // 强制归属，忽略调用方传入的 userId / id / createdAt
     const newTask = {
+      ...taskData,
       id: generateTaskId(),
       createdAt: formatDate(new Date()),
-      ...taskData
+      userId
     }
-    tasks.unshift(newTask)
-    saveTasks(tasks)
-    logger.info('任务已添加', newTask)
+    ns.tasks.unshift(newTask)
+
+    if (!saveNamespace(ns)) return null
+    logger.info('任务已添加', { id: newTask.id, userId })
     return enrichTask(newTask)
   },
 
+  /**
+   * 更新任务，仅限任务归属人
+   */
   update(taskId, updates) {
-    const tasks = loadTasks()
-    const index = tasks.findIndex(t => t.id === taskId)
-    if (index === -1) {
-      logger.warn('任务不存在', taskId)
+    const userId = currentUserId()
+    if (!userId) {
+      logger.warn('未登录，禁止更新任务')
       return null
     }
-    tasks[index] = { ...tasks[index], ...updates }
-    saveTasks(tasks)
-    logger.info('任务已更新', taskId, updates)
-    return enrichTask(tasks[index])
+
+    const ns = getNamespace()
+    const index = ns.tasks.findIndex(t => t.id === taskId && t.userId === userId)
+    if (index === -1) {
+      logger.warn('任务不存在或不属于当前用户', { taskId, userId })
+      return null
+    }
+
+    // 禁止通过更新篡改归属、ID、创建时间
+    const safeUpdates = { ...updates }
+    delete safeUpdates.userId
+    delete safeUpdates.id
+    delete safeUpdates.createdAt
+    ns.tasks[index] = { ...ns.tasks[index], ...safeUpdates }
+
+    if (!saveNamespace(ns)) return null
+    logger.info('任务已更新', { taskId, fields: Object.keys(safeUpdates) })
+    return enrichTask(ns.tasks[index])
   },
 
   updateStatus(taskId, newStatus) {
@@ -256,16 +335,27 @@ export const taskStore = {
     return this.update(taskId, { status: newStatus })
   },
 
+  /**
+   * 删除任务，仅限任务归属人
+   */
   remove(taskId) {
-    const tasks = loadTasks()
-    const filtered = tasks.filter(t => t.id !== taskId)
-    if (filtered.length === tasks.length) {
-      logger.warn('任务不存在，无法删除', taskId)
+    const userId = currentUserId()
+    if (!userId) {
+      logger.warn('未登录，禁止删除任务')
       return false
     }
-    saveTasks(filtered)
-    logger.info('任务已删除', taskId)
-    return true
+
+    const ns = getNamespace()
+    const filtered = ns.tasks.filter(t => !(t.id === taskId && t.userId === userId))
+    if (filtered.length === ns.tasks.length) {
+      logger.warn('任务不存在或不属于当前用户，无法删除', { taskId, userId })
+      return false
+    }
+
+    ns.tasks = filtered
+    const ok = saveNamespace(ns)
+    if (ok) logger.info('任务已删除', { taskId })
+    return ok
   },
 
   addBookingTask(table, bookingInfo) {
@@ -332,13 +422,16 @@ export const taskStore = {
     })
   },
 
+  /**
+   * 标记任务已支付，仅限归属人
+   */
   markAsPaid(taskId) {
     const task = this.getById(taskId)
     if (!task) return null
-    
+
     let newStatus = 'upcoming'
     let newSubtitle = '支付成功'
-    
+
     if (task.type === 'order') {
       newStatus = 'pending_shipment'
       newSubtitle = '支付成功，待发货'
@@ -347,7 +440,7 @@ export const taskStore = {
     } else if (task.type === 'booking') {
       newSubtitle = '支付成功，等待使用'
     }
-    
+
     return this.update(taskId, { status: newStatus, subtitle: newSubtitle })
   },
 
@@ -359,9 +452,69 @@ export const taskStore = {
     return this.getByStatus('completed').length
   },
 
+  /**
+   * 当前用户的消费统计（全部基于本人任务实时计算）
+   * @returns {{totalSpent: number, pendingPaymentCount: number, totalCount: number}}
+   */
+  getConsumptionStats() {
+    const tasks = this.getAll()
+    return {
+      totalSpent: tasks
+        .filter(t => PAID_STATUSES.includes(t.status))
+        .reduce((sum, t) => sum + (Number(t.amount) || 0), 0),
+      pendingPaymentCount: tasks.filter(t => t.status === 'pending_payment').length,
+      totalCount: tasks.length
+    }
+  },
+
+  // ==================== 积分明细（按用户隔离） ====================
+
+  /**
+   * 获取当前用户的积分变动明细
+   */
+  getPointsRecords() {
+    const ns = getNamespace()
+    if (!ns) return []
+    return [...ns.pointsRecords].sort((a, b) => new Date(b.date) - new Date(a.date))
+  },
+
+  /**
+   * 追加一条积分变动记录（如积分兑换扣减）
+   * @param {{title: string, amount: number, type: 'add'|'minus'}} record
+   */
+  addPointsRecord(record) {
+    const userId = currentUserId()
+    if (!userId) {
+      logger.warn('未登录，禁止写入积分明细')
+      return null
+    }
+
+    const ns = getNamespace()
+    const newRecord = {
+      id: 'P' + Date.now().toString() + Math.floor(Math.random() * 1000).toString().padStart(3, '0'),
+      date: formatDate(new Date()).slice(0, 10),
+      title: record.title,
+      amount: Number(record.amount) || 0,
+      type: record.type === 'add' ? 'add' : 'minus',
+      userId
+    }
+    ns.pointsRecords.unshift(newRecord)
+
+    if (!saveNamespace(ns)) return null
+    return { ...newRecord }
+  },
+
+  /**
+   * 清空当前用户的全部任务数据（不影响其他账户）
+   */
   clearAll() {
-    saveTasks([])
-    logger.info('所有任务已清除')
+    const userId = currentUserId()
+    if (!userId) return false
+    const store = loadStore()
+    store.users[userId] = { tasks: [], pointsRecords: [] }
+    const ok = saveStore(store)
+    if (ok) logger.info('当前用户任务数据已清除', { userId })
+    return ok
   }
 }
 

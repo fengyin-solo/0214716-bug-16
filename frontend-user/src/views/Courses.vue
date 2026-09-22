@@ -196,7 +196,7 @@
     <Toast v-model="showToast" :type="toastType" :title="toastTitle" :message="toastMessage" />
 
     <!-- Login Modal -->
-    <LoginModal v-model="showLoginModal" @login-success="onLoginSuccess" />
+    <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
 
     <!-- My Courses Modal -->
     <Modal v-model="showMyCoursesModal" title="我的课程" size="medium" :show-footer="false">
@@ -349,10 +349,24 @@ export default {
       }
     },
     async confirmEnroll() {
+      if (!isAuthenticated()) {
+        this.showEnrollModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再报名')
+        return
+      }
+      if (this.enrollLoading) return
       this.enrollLoading = true
-      
+
       await new Promise(resolve => setTimeout(resolve, 1500))
-      
+
+      // 模拟请求后再次确认登录态，避免会话失效期间产生无主任务
+      if (!isAuthenticated()) {
+        this.enrollLoading = false
+        this.showEnrollModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再报名')
+        return
+      }
+
       const expireDate = new Date()
       expireDate.setMonth(expireDate.getMonth() + 6)
       const orderNo = 'CR' + Date.now().toString().slice(-8)

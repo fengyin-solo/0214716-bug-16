@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { logger } from '../utils/api'
+import { isAuthenticated } from '../utils/auth'
 import Home from '../views/Home.vue'
 import Tables from '../views/Tables.vue'
 import Courses from '../views/Courses.vue'
@@ -14,8 +15,13 @@ const routes = [
   { path: '/courses', name: 'Courses', component: Courses },
   { path: '/competitions', name: 'Competitions', component: Competitions },
   { path: '/shop', name: 'Shop', component: Shop },
-  { path: '/profile', name: 'Profile', component: Profile },
-  { path: '/tasks', name: 'Tasks', component: Tasks }
+  // 个人资料与任务/订单仅登录用户可访问，重定向时保留原目标地址
+  { path: '/profile', name: 'Profile', component: Profile, meta: { requiresAuth: true } },
+  { path: '/tasks', name: 'Tasks', component: Tasks, meta: { requiresAuth: true } },
+  // 兼容历史链接：/login 不是独立页面，回到首页并弹出登录框
+  { path: '/login', redirect: { path: '/', query: { login: '1' } } },
+  // 未知路径回到首页
+  { path: '/:pathMatch(.*)*', redirect: '/' }
 ]
 
 const router = createRouter({
@@ -25,6 +31,14 @@ const router = createRouter({
 
 router.beforeEach((to, from, next) => {
   logger.info('Navigation', { from: from.path, to: to.path })
+
+  if (to.meta.requiresAuth && !isAuthenticated()) {
+    logger.warn('Navigation blocked: login required', { to: to.path })
+    // 标记登录来源，登录成功后回到目标页面；同时触发全局登录弹窗
+    next({ path: '/', query: { login: '1', redirect: to.fullPath } })
+    return
+  }
+
   next()
 })
 

@@ -24,6 +24,7 @@ const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
 
 // 任务存储（用于任务中心数据持久化）
 import { taskStore as ts } from './taskStore'
+import { handleUnauthorized } from './auth'
 const taskStore = ts
 
 /**
@@ -138,6 +139,10 @@ async function request(url, options = {}) {
     // 检查HTTP状态码
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
+      // 401/403：登录失效或无权限，清除本地会话并通知全局
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized()
+      }
       throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`)
     }
     
@@ -210,7 +215,8 @@ function handleLogin(options) {
     logger.info('Mock login successful', { username })
     return {
       token,
-      user: mockData.user
+      // 返回深拷贝，避免多次登录共享同一可变用户对象导致旧会话脏数据残留
+      user: JSON.parse(JSON.stringify(mockData.user))
     }
   }
   
@@ -269,16 +275,20 @@ function handleOrders(options) {
  * POST: 执行任务操作（支付、取消等）
  */
 function handleUserTasks(options) {
-  // 等待 taskStore 加载完成
-  if (!taskStore) {
+  // 任务/订单属于登录用户私有数据，未登录一律拒绝
+  const token = localStorage.getItem('billiard_token')
+  if (!token) {
+    if (options.method === 'POST') {
+      return { success: false, message: '登录已失效，请重新登录' }
+    }
     return []
   }
-  
+
   if (options.method === 'POST') {
     const body = JSON.parse(options.body || '{}')
     const { taskId, action } = body
     logger.info('Task action via API', { taskId, action })
-    
+
     if (action === 'pay') {
       const result = taskStore.markAsPaid(taskId)
       return { success: !!result, message: result ? '支付成功' : '支付失败' }
@@ -286,11 +296,11 @@ function handleUserTasks(options) {
       const result = taskStore.remove(taskId)
       return { success: result, message: result ? '取消成功' : '取消失败' }
     }
-    
+
     return { success: true, message: '操作成功' }
   }
-  
-  // GET 请求，从 taskStore 获取真实数据
+
+  // GET 请求，从 taskStore 获取当前登录用户的数据
   const params = options.params || {}
   if (params.status) {
     return taskStore.getByStatus(params.status)

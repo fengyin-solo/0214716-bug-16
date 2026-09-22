@@ -32,9 +32,17 @@
     
     <!-- 页脚组件 -->
     <FooterBar />
-    
+
     <!-- 登录弹窗 -->
     <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
+
+    <!-- 全局提示（登录失效等） -->
+    <Toast
+      v-model="showToast"
+      :type="toastType"
+      :title="toastTitle"
+      :message="toastMessage"
+    />
   </div>
 </template>
 
@@ -43,21 +51,28 @@
  * 应用根组件
  * 负责整合全局布局组件和管理登录状态
  */
-import { authState } from './utils/auth'
+import { authState, isAuthenticated, onSessionExpired } from './utils/auth'
+import { logger } from './utils/api'
 import NavBar from './components/NavBar.vue'
 import FooterBar from './components/FooterBar.vue'
 import LoginModal from './components/LoginModal.vue'
+import Toast from './components/Toast.vue'
 
 export default {
   name: 'App',
-  components: { 
+  components: {
     NavBar,
     FooterBar,
-    LoginModal 
+    LoginModal,
+    Toast
   },
   data() {
     return {
-      showLoginModal: false // 登录弹窗显示状态
+      showLoginModal: false, // 登录弹窗显示状态
+      showToast: false,
+      toastType: 'warning',
+      toastTitle: '',
+      toastMessage: ''
     }
   },
   computed: {
@@ -76,19 +91,61 @@ export default {
       return authState.user?.name || 'U'
     }
   },
+  mounted() {
+    // 路由守卫（未登录访问受保护页面）会携带 login=1 回到首页并要求登录
+    this.unwatchLoginQuery = this.$router.beforeResolve((to) => {
+      if (to.query.login === '1' && !isAuthenticated()) {
+        this.openLogin()
+      }
+    })
+
+    // 会话失效（401、跨标签页退出、凭证损坏）：统一回到首页并引导重新登录
+    this.unsubscribeSessionExpired = onSessionExpired(({ reason }) => {
+      logger.info('Handling session expired', { reason })
+      const messageMap = {
+        unauthorized: '登录已失效，请重新登录',
+        cross_tab_logout: '您已在其他页面退出登录',
+        invalid_storage: '登录信息异常，请重新登录'
+      }
+      this.showToastMessage('warning', '登录状态异常', messageMap[reason] || '请重新登录')
+
+      if (this.$route.path !== '/') {
+        this.$router.replace('/')
+      }
+      // 等路由离开受保护页面后再弹窗
+      setTimeout(() => this.openLogin(), 0)
+    })
+  },
+  beforeUnmount() {
+    this.unwatchLoginQuery?.()
+    this.unsubscribeSessionExpired?.()
+  },
   methods: {
     /**
      * 打开登录弹窗
      */
     openLogin() {
+      if (isAuthenticated()) return
       this.showLoginModal = true
     },
     /**
      * 登录成功回调
-     * 可在此处添加登录成功后的全局处理逻辑
+     * 若登录前正在访问受保护页面，登录后跳回原目标
      */
     onLoginSuccess() {
-      // 登录成功后的处理
+      const redirect = this.$route.query.redirect
+      if (redirect && typeof redirect === 'string' && redirect.startsWith('/')) {
+        this.$router.replace(redirect).catch(() => {})
+      } else if (this.$route.query.login || this.$route.query.redirect) {
+        // 清理登录引导参数，避免刷新或回退时重复弹窗
+        this.$router.replace({ path: this.$route.path, query: {} }).catch(() => {})
+      }
+    },
+    showToastMessage(type, title, message) {
+      this.toastType = type
+      this.toastTitle = title
+      this.toastMessage = message
+      this.showToast = true
     }
   }
 }

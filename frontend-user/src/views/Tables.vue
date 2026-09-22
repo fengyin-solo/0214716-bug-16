@@ -204,7 +204,7 @@
     <Toast v-model="showToast" :type="toastType" :title="toastTitle" :message="toastMessage" />
 
     <!-- Login Modal -->
-    <LoginModal v-model="showLoginModal" @login-success="onLoginSuccess" />
+    <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
   </div>
 </template>
 
@@ -313,11 +313,25 @@ export default {
       }
     },
     async confirmBooking() {
+      if (!isAuthenticated()) {
+        this.showBookingModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再预约')
+        return
+      }
+      if (this.bookingLoading) return
       this.bookingLoading = true
-      
+
       // Simulate API call
       await new Promise(resolve => setTimeout(resolve, 1500))
-      
+
+      // 模拟请求后再次确认登录态，避免会话失效期间产生无主预约
+      if (!isAuthenticated()) {
+        this.bookingLoading = false
+        this.showBookingModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再预约')
+        return
+      }
+
       const slot = this.timeSlots.find(s => s.id === this.selectedTimeSlot)
       const orderNo = 'BK' + Date.now().toString().slice(-8)
       this.bookingResult = {

@@ -121,7 +121,7 @@
 
     <Toast v-model="showToast" :type="toastType" :title="toastTitle" :message="toastMessage" />
 
-    <LoginModal v-model="showLoginModal" @login-success="onLoginSuccess" />
+    <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
   </div>
 </template>
 
@@ -198,15 +198,30 @@ export default {
       }
     },
     async confirmJoin() {
+      if (!isAuthenticated()) {
+        this.showJoinModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再报名')
+        return
+      }
+      if (this.joinLoading) return
       this.joinLoading = true
       await new Promise(resolve => setTimeout(resolve, 1500))
-      const regInfo = { 
-        regNo: 'REG' + Date.now().toString().slice(-8), 
-        playerNo: Math.floor(Math.random() * 100) + 1 
+
+      // 模拟请求后再次确认登录态，避免会话失效期间产生无主任务
+      if (!isAuthenticated()) {
+        this.joinLoading = false
+        this.showJoinModal = false
+        this.showNotification('warning', '登录已失效', '请重新登录后再报名')
+        return
+      }
+
+      const regInfo = {
+        regNo: 'REG' + Date.now().toString().slice(-8),
+        playerNo: Math.floor(Math.random() * 100) + 1
       }
       this.joinResult = { ...regInfo, compName: this.selectedComp.name }
-      
-      // 添加到任务中心
+
+      // 添加到任务中心（强制归属当前登录用户）
       taskStore.addCompetitionTask(this.selectedComp, regInfo)
       
       this.joinLoading = false
